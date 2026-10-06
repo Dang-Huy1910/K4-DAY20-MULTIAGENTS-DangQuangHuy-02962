@@ -68,7 +68,84 @@ def curate_skills(results_dir="results", source_condition="baseline", out_dir=No
     model mặc định: make_model() (lab.model).
     Trả về: danh sách đường dẫn SKILL.md đã ghi.
     """
-    raise NotImplementedError("TODO: cài đặt curate_skills (xem guides/pseudocode/04_curator.md)")
+    import json
+
+    from .model import make_model
+    from .tasks import ROOT
+
+    results_dir = Path(results_dir)
+    out_dir = Path(out_dir) if out_dir is not None else ROOT / "skills" / "auto"
+
+    runs = []
+    for run_path in sorted((results_dir / source_condition).glob("*/run.json")):
+        r = json.loads(run_path.read_text(encoding="utf-8"))
+        if r.get("role") != "learn":
+            continue
+        trace_path = run_path.parent / "trace.md"
+        trace = ""
+        if trace_path.exists():
+            trace = trace_path.read_text(encoding="utf-8")[-6000:]
+        failed = [
+            (c.get("name", ""), c.get("detail") or "")
+            for c in r.get("checks", [])
+            if not c.get("passed")
+        ]
+        runs.append({"task": r.get("task", run_path.parent.name), "failed": failed, "trace": trace})
+
+    if not any(run["failed"] for run in runs):
+        print("không có check thất bại ở tác vụ học")
+        return []
+
+    if model is None:
+        model = make_model()
+
+    sections = []
+    for run in runs:
+        if not run["failed"]:
+            continue
+        lines = [f"Task: {run['task']}", "Failed checks:"]
+        for name, detail in run["failed"]:
+            lines.append(f"- {name}: {detail}")
+        lines.append("Trace (tail):")
+        lines.append(run["trace"])
+        sections.append("\n".join(lines))
+
+    prompt = (
+        "You write SKILL files for a programming and data-analysis agent.\n"
+        "Below are failed checks (name and the review-bot comment) and traces of learning runs.\n"
+        "Find shared PROCESS mistakes (not concrete answers) and write at most "
+        f"{max_skills} short skills that prevent those mistakes on NEW tasks of the same kind.\n\n"
+        "Rules:\n"
+        "- Skills must be general: do not name task ids, task-specific file names, answers, or numbers.\n"
+        "- Each skill has YAML frontmatter with `name` (lowercase, hyphens) and `description` "
+        "(one sentence: WHEN TO USE), then at most 40 lines of imperative checklist.\n"
+        "- Output format, character-for-character:\n"
+        "=== SKILL: <name> ===\n"
+        "---\n"
+        "name: <name>\n"
+        "description: <when to use>\n"
+        "---\n"
+        "<body>\n"
+        "=== END ===\n\n"
+        + "\n\n".join(sections)
+    )
+
+    reply = model.invoke(prompt)
+    content = reply.content if hasattr(reply, "content") else str(reply)
+    if not isinstance(content, str):
+        content = str(content)
+
+    written: list[Path] = []
+    for name, text in parse_skill_blocks(content):
+        if len(written) >= max_skills:
+            break
+        if validate_skill(text, expected_name=name):
+            continue
+        dest = out_dir / name / "SKILL.md"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+        written.append(dest)
+    return written
 
 
 if __name__ == "__main__":
